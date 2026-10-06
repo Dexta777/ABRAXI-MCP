@@ -1,0 +1,23 @@
+[project]
+name = "abraxi-mcp"
+version = "0.1.0"
+description = "Synthetic-root, stdio-only filesystem MCP tracer"
+requires-python = ">=3.13,<3.15"
+dependencies = ["mcp[cli]==2.3.0"]
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+abraxi-mcp = "abraxi_mcp.__main__:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["uv_build==0.12.19"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
