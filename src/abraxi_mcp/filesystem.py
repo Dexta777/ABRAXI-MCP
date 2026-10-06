@@ -31,6 +31,7 @@ MESSAGES = {
     "UNSUPPORTED_FILE_TYPE": "The object is not a supported file or directory.",
     "NOT_FOUND": "The requested object or parent does not exist.",
     "ALREADY_EXISTS": "The create target already exists.",
+    "READ_PROTECTED": "Startup policy denies reads at this path.",
     "WRITE_PROTECTED": "Startup policy denies writes at this path.",
     "STALE_CONTENT": "The expected SHA-256 does not match current content.",
     "PAYLOAD_TOO_LARGE": "The UTF-8 text exceeds the byte limit.",
@@ -94,20 +95,17 @@ def _policy_component(name: str) -> str:
 
 
 class RootFilesystem:
-    """One retained root descriptor and immutable startup write-prefix policy.
+    """One retained root descriptor and immutable startup prefix policies.
 
     Callers own this object's lifetime; close only after all tool calls finish.
     Regular files with multiple hard links are refused to avoid outside aliases.
     """
 
-    def __init__(self, root: str | os.PathLike[str], write_denied_prefixes: tuple[str, ...] = ()):
+    def __init__(self, root: str | os.PathLike[str], write_denied_prefixes: tuple[str, ...] = (),
+                 *, read_denied_prefixes: tuple[str, ...] = ()):
         self._fd = -1
-        prefixes = []
-        for prefix in write_denied_prefixes:
-            # A single conventional trailing slash is allowed in configuration.
-            parts = self._parts(prefix[:-1] if prefix.endswith("/") else prefix, directory=True)
-            prefixes.append(parts)
-        self._denied = tuple(prefixes)
+        self._denied = self._prefixes(write_denied_prefixes)
+        self._read_denied = self._prefixes(read_denied_prefixes)
         try:
             supplied = os.fspath(root)
             if not supplied or "\x00" in supplied or ".." in supplied.split("/"):
@@ -146,6 +144,12 @@ class RootFilesystem:
         if self._fd >= 0:
             os.close(self._fd)
             self._fd = -1
+
+    @classmethod
+    def _prefixes(cls, configured: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+        # A single conventional trailing slash is allowed in configuration.
+        return tuple(cls._parts(prefix[:-1] if prefix.endswith("/") else prefix, directory=True)
+                     for prefix in configured)
 
     @staticmethod
     def _parts(path: str, *, directory: bool = False) -> tuple[str, ...]:
@@ -244,9 +248,17 @@ class RootFilesystem:
                 raise Refusal("BUSY") from None
             raise
 
-    def _write_allowed(self, parts: tuple[str, ...]) -> None:
+    @staticmethod
+    def _protected(parts: tuple[str, ...], prefixes: tuple[tuple[str, ...], ...]) -> bool:
         key = tuple(_policy_component(p) for p in parts)
-        if any(key[:len(prefix)] == tuple(_policy_component(p) for p in prefix) for prefix in self._denied):
+        return any(key[:len(prefix)] == tuple(_policy_component(p) for p in prefix) for prefix in prefixes)
+
+    def _read_allowed(self, parts: tuple[str, ...]) -> None:
+        if self._protected(parts, self._read_denied):
+            raise Refusal("READ_PROTECTED")
+
+    def _write_allowed(self, parts: tuple[str, ...]) -> None:
+        if self._protected(parts, self._denied) or self._protected(parts, self._read_denied):
             raise Refusal("WRITE_PROTECTED")
 
     @staticmethod
@@ -309,6 +321,7 @@ class RootFilesystem:
             "server_version": __version__, "tool_surface_version": "bootstrap-001",
             "configured_root": self.root, "root_device": self.device,
             "read_enabled": True, "write_enabled": True,
+            "read_denied_prefixes": ["/".join(p) or "." for p in self._read_denied],
             "write_denied_prefixes": ["/".join(p) or "." for p in self._denied],
             "max_text_bytes": MAX_TEXT_BYTES, "max_directory_entries": MAX_DIRECTORY_ENTRIES,
         }
@@ -316,12 +329,16 @@ class RootFilesystem:
     @result_method
     def list_directory(self, path: str = ".", limit: int = MAX_DIRECTORY_ENTRIES) -> dict[str, Any]:
         parts = self._parts(path, directory=True)
+        self._read_allowed(parts)
         if type(limit) is not int or not 1 <= limit <= MAX_DIRECTORY_ENTRIES:
             raise Refusal("INVALID_PATH")
         with self._directories(parts) as (fd, chain):
-            # Keep only limit names in memory, even for very large directories.
+            # Filter names before selection, pagination, or metadata inspection:
+            # hidden entries cannot affect returned entries or truncation.
             with os.scandir(fd) as iterator:
-                names = heapq.nsmallest(limit + 1, (entry.name for entry in iterator))
+                visible = (entry.name for entry in iterator
+                           if not self._protected((*parts, entry.name), self._read_denied))
+                names = heapq.nsmallest(limit + 1, visible)
             entries = []
             for name in names[:limit]:
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -335,6 +352,7 @@ class RootFilesystem:
 
     def _read(self, path: str, *, text: bool) -> dict[str, Any]:
         parts = self._parts(path)
+        self._read_allowed(parts)
         with self._directories(parts[:-1]) as (parent, chain):
             fd = self._open(parent, parts[-1], directory=False)
             try:

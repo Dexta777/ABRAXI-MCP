@@ -1,8 +1,11 @@
 # ABRAXI-MCP
 
-Bootstrap 001 is a local, synthetic-root filesystem tracer using the official
-Python MCP SDK 2.3.0. It exposes exactly six tools over **stdio only**. This is
-an uncommitted bootstrap candidate, not a production-ready service.
+Bootstrap 001 is published at version 0.1.0 as a local, synthetic-root
+filesystem tracer using the official Python MCP SDK 2.3.0. This uncommitted
+Real-root Safety 001 candidate advances the project/server to version 0.2.0
+and adds configurable read protection before real-root qualification. The
+six tools and **stdio-only** transport are unchanged. The real ABRAXI root
+has not been enabled or qualified; this is not a production-ready service.
 
 ## Install and run locally
 
@@ -15,14 +18,16 @@ backend packages the source; it is not an additional runtime dependency.
 ```sh
 uv sync --locked
 uv run python -m abraxi_mcp --root /absolute/path/to/synthetic-root \
-  --write-denied-prefix protected/
+  --write-denied-prefix protected/ --read-denied-prefix sealed/
 ```
 
 Supply an existing synthetic directory explicitly. There is no default root,
 transport option, listening socket, background service, dotenv loading, or
-configuration file. `--write-denied-prefix` is repeatable; `.` denies all
-writes. The launcher owns the process lifetime. Logs and startup errors go to
-stderr; stdout carries only the SDK's MCP protocol traffic.
+configuration file. Both prefix options are repeatable. `--write-denied-prefix .`
+denies all writes; `--read-denied-prefix .` denies all filesystem reads and
+writes while keeping `workspace_status` available. The launcher owns the
+process lifetime. Logs and startup errors go to stderr; stdout carries only
+the SDK's MCP protocol traffic.
 
 Do not use a real project directory for this bootstrap. No real ABRAXI root,
 tunnel, ChatGPT/plugin connection, credential access, deployment, governance
@@ -39,19 +44,42 @@ unknown-tool errors use the SDK's ordinary MCP error result.
 
 | Tool | Input and behavior |
 | --- | --- |
-| `workspace_status` | Reports server/tool-surface version, canonical startup root, root device, read/write capability, configured denied prefixes, and limits. |
-| `list_directory` | `path` defaults to `.`; `limit` is 1–256 (default 256). One level, sorted by Python string ordering, root-relative entry paths and file/directory/symlink/unsupported kinds. Symlinks are never followed. `truncated` explicitly indicates additional entries. Only limit+1 names are retained in memory. |
+| `workspace_status` | Reports server/tool-surface version, canonical startup root, root device, read/write capability, read-denied and write-denied prefixes separately, and limits. Prefix configuration does not imply that any corresponding object exists. |
+| `list_directory` | `path` defaults to `.`; `limit` is 1–256 (default 256). One level, sorted by Python string ordering, root-relative entry paths and file/directory/symlink/unsupported kinds. Symlinks are never followed. Direct read-denied children are invisible. `truncated` describes additional visible entries only. Only limit+1 visible names are retained in memory. |
 | `read_text_file` | `path`; regular, singly linked file; complete strict UTF-8 with byte `size`, `sha256`, and `content`. Maximum 1,048,576 bytes, including multi-byte characters. No partial-content success. |
 | `sha256_file` | `path`; regular, singly linked file; streams exact bytes, including binary, returning byte `size` and full `sha256`. Reading is bounded by the file's initial size plus one byte; detected changes return `OUTCOME_UNKNOWN`. |
 | `create_text_file` | `path`, `content`; existing parent, absent target, exclusive creation, mode 0600, maximum 1,048,576 UTF-8 bytes. Flushes file and parent directory before success and verifies actual bytes and pathname identity. |
 | `update_text_file` | `path`, mandatory lowercase 64-hex `expected_sha256`, `content`; existing regular, singly linked file. One non-blocking exclusive lock attempt; reads the actual descriptor after locking; stale content refuses without writing. Updates/truncates the same descriptor, fsyncs, re-hashes and verifies pathname identity before success. Preserves existing permissions. |
 
-Read capability is enabled and write tools are enabled subject to startup
-prefix policy. Prefix `protected` denies the prefix itself and descendants,
-but does not deny `protected-suffix`. Prefix checks conservatively normalize
-Unicode and case-fold to protect macOS aliases; this may also deny differently
-cased names on case-sensitive volumes. Read access is unaffected by write
-prefix policy when the object otherwise meets the file/path rules.
+Read and write tools are enabled subject to separate startup prefix policies:
+
+- **Read-denied:** no read/list/hash; implicitly no create/update. Valid paths
+  equal to or beneath the prefix return `READ_PROTECTED` from read/list/hash
+  and `WRITE_PROTECTED` from create/update, before path existence or type
+  inspection. Existing and absent protected targets get identical generic
+  policy refusals. Caller-path validation still occurs first.
+- **Write-denied:** no create/update, but list/read/hash remain allowed when
+  the object otherwise meets the filesystem rules.
+
+Both policies match components: `sealed` protects itself and descendants but
+not `sealed-suffix`; `repo/private` does not protect unrelated siblings or
+the same basename elsewhere. A conventional trailing slash is accepted in
+startup configuration. Checks conservatively normalize Unicode and case-fold
+to protect macOS aliases; this may also deny differently cased names on
+case-sensitive volumes. There are no glob or basename-pattern semantics.
+
+A parent listing filters direct read-denied child names before sorting,
+result bounding, or child metadata inspection. It returns no denied name,
+kind, device information, placeholder, denial marker, or hidden-entry count.
+Hidden entries cannot cause a false `truncated` indication. The server must
+locally examine entry names to apply this policy. Policy configuration itself
+is intentionally visible in `workspace_status`; it is not evidence of file
+existence. Response timing is not guaranteed to be constant.
+
+There is no built-in project-specific secret policy or credential detector.
+Only explicitly configured root-relative prefixes are protected. Selecting
+actual policy for real projects and qualifying a real root remain separate
+future work; this candidate does not claim universal secret detection.
 
 ## Filesystem boundary
 
@@ -106,7 +134,7 @@ Stable refusal outcomes:
 
 ```text
 INVALID_PATH OUTSIDE_ROOT SYMLINK_REFUSED MOUNT_ESCAPE_REFUSED
-UNSUPPORTED_FILE_TYPE NOT_FOUND ALREADY_EXISTS WRITE_PROTECTED
+UNSUPPORTED_FILE_TYPE NOT_FOUND ALREADY_EXISTS READ_PROTECTED WRITE_PROTECTED
 STALE_CONTENT PAYLOAD_TOO_LARGE INVALID_TEXT BUSY OUTCOME_UNKNOWN
 INTERNAL_ERROR
 ```
@@ -133,6 +161,11 @@ races, partial failures, and one bounded SDK stdio subprocess test. That test
 asserts exit status zero and that the child has already been reaped. Device
 boundary tests inject descriptor metadata; they do not claim real mount
 qualification. No test requires privileges or system configuration.
+
+Safety 001 tests additionally cover identical protected-path refusals before
+filesystem inspection, implicit write denial, write-only read access,
+component/case/Unicode policy semantics, invisible child metadata and visible
+pagination, root-wide denial, and read protection over both MCP test transports.
 
 Official references: [MCP clients](https://py.sdk.modelcontextprotocol.io/client/),
 [MCP transports](https://py.sdk.modelcontextprotocol.io/client/transports/),

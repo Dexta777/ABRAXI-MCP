@@ -379,9 +379,179 @@ def test_internal_error_does_not_leak(fs, monkeypatch):
 
 def test_status(fs, tmp_path):
     result = fs.workspace_status()
-    assert result["ok"] and result["server_version"] == "0.1.0"
+    assert result["ok"] and result["server_version"] == "0.2.0"
     assert result["configured_root"] == str(tmp_path.resolve())
     assert result["root_device"] == tmp_path.stat().st_dev
     assert result["read_enabled"] and result["write_enabled"]
     assert result["write_denied_prefixes"] == ["protected"]
+    assert result["read_denied_prefixes"] == []
     assert result["max_text_bytes"] == MAX_TEXT_BYTES
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_read_denial_before_inspection_exists_or_absent(tmp_path, monkeypatch, present):
+    if present:
+        (tmp_path / "sealed-file").write_bytes(b"synthetic original")
+        (tmp_path / "sealed-dir").mkdir()
+        (tmp_path / "sealed-dir/file").write_bytes(b"synthetic child")
+    with RootFilesystem(tmp_path, read_denied_prefixes=("sealed-file", "sealed-dir/")) as fs:
+        inspections = []
+
+        def inspected(*args, **kwargs):
+            inspections.append((args, kwargs))
+            raise AssertionError("Denied paths must not reach filesystem inspection")
+
+        with monkeypatch.context() as patch:
+            for name in ["stat", "fstat", "open", "dup", "scandir"]:
+                patch.setattr(os, name, inspected)
+            expected_read = {"ok": False, "outcome": "READ_PROTECTED",
+                             "message": "Startup policy denies reads at this path."}
+            expected_write = {"ok": False, "outcome": "WRITE_PROTECTED",
+                              "message": "Startup policy denies writes at this path."}
+            for path in ["sealed-file", "sealed-dir", "sealed-dir/file"]:
+                assert fs.read_text_file(path) == expected_read
+                assert fs.sha256_file(path) == expected_read
+                assert fs.list_directory(path) == expected_read
+                assert fs.create_text_file(path, "bad") == expected_write
+                assert fs.update_text_file(path, sha(b"synthetic original"), "bad") == expected_write
+            assert not inspections
+        status = fs.workspace_status()
+        assert status["read_denied_prefixes"] == ["sealed-file", "sealed-dir"]
+        assert status["write_denied_prefixes"] == []
+    if present:
+        assert (tmp_path / "sealed-file").read_bytes() == b"synthetic original"
+        assert (tmp_path / "sealed-dir/file").read_bytes() == b"synthetic child"
+    else:
+        assert not list(tmp_path.iterdir())
+
+
+def test_write_only_policy_with_separate_read_denial(tmp_path):
+    (tmp_path / "write-only").mkdir()
+    (tmp_path / "write-only/file").write_bytes(b"readable")
+    with RootFilesystem(tmp_path, ("write-only",), read_denied_prefixes=("sealed",)) as fs:
+        assert fs.list_directory("write-only")["entries"][0]["path"] == "write-only/file"
+        assert fs.read_text_file("write-only/file")["content"] == "readable"
+        assert fs.sha256_file("write-only/file")["sha256"] == sha(b"readable")
+        assert fs.create_text_file("write-only/new", "bad")["outcome"] == "WRITE_PROTECTED"
+        assert fs.update_text_file("write-only/file", sha(b"readable"), "bad")["outcome"] == "WRITE_PROTECTED"
+        assert fs.read_text_file("sealed")["outcome"] == "READ_PROTECTED"
+        assert (tmp_path / "write-only/file").read_bytes() == b"readable"
+
+
+def test_listing_hidden_children_never_inspected_or_counted(tmp_path, monkeypatch):
+    (tmp_path / "project").mkdir()
+    parent = tmp_path / "project"
+    (parent / "visible").write_bytes(b"public")
+    (parent / "sealed-file").write_bytes(b"synthetic")
+    (parent / "sealed-dir").mkdir()
+    (parent / "sealed-link").symlink_to("sealed-dir")
+    os.mkfifo(parent / "sealed-fifo")
+    hidden = {"sealed-file", "sealed-dir", "sealed-link", "sealed-fifo"}
+    hidden.update(f"hidden-{i}" for i in range(10))
+    for name in sorted(hidden):
+        if name.startswith("hidden-"):
+            (parent / name).write_text("synthetic")
+    prefixes = tuple("project/" + name for name in sorted(hidden))
+    with RootFilesystem(tmp_path, read_denied_prefixes=prefixes) as fs:
+        actual_stat = os.stat
+        inspected_hidden = []
+
+        def guarded_stat(path, *args, **kwargs):
+            if path in hidden:
+                inspected_hidden.append(path)
+                raise AssertionError("Hidden children must not be statted")
+            return actual_stat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "stat", guarded_stat)
+            for limit in [1, 2, MAX_DIRECTORY_ENTRIES]:
+                result = fs.list_directory("project", limit)
+                assert result["ok"] and not result["truncated"]
+                assert result["entries"] == [{"path": "project/visible", "kind": "file", "same_device": True}]
+                assert all(name not in str(result) for name in hidden)
+            assert not inspected_hidden
+        (parent / "visible").unlink()
+        empty = fs.list_directory("project", 1)
+        assert empty["ok"] and empty["entries"] == [] and not empty["truncated"]
+
+
+def test_visible_entries_still_truncate_legitimately(tmp_path):
+    for name in ["z", "b", "a", "hidden"]:
+        (tmp_path / name).write_text("synthetic")
+    with RootFilesystem(tmp_path, read_denied_prefixes=("hidden",)) as fs:
+        limited = fs.list_directory(limit=2)
+        assert limited["ok"] and limited["truncated"]
+        assert [entry["path"] for entry in limited["entries"]] == ["a", "b"]
+        complete = fs.list_directory(limit=3)
+        assert not complete["truncated"]
+        assert [entry["path"] for entry in complete["entries"]] == ["a", "b", "z"]
+
+
+def test_read_prefixes_are_component_bound_and_nested(tmp_path):
+    for directory in ["secret", "secret-suffix", "repo/private", "repo/public", "other/private"]:
+        (tmp_path / directory).mkdir(parents=True, exist_ok=True)
+        (tmp_path / directory / "file").write_bytes(b"synthetic")
+    with RootFilesystem(tmp_path, read_denied_prefixes=("secret", "repo/private/")) as fs:
+        for path in ["secret", "secret/file", "repo/private", "repo/private/file"]:
+            assert fs.read_text_file(path)["outcome"] == "READ_PROTECTED"
+            assert fs.sha256_file(path)["outcome"] == "READ_PROTECTED"
+            assert fs.list_directory(path)["outcome"] == "READ_PROTECTED"
+            assert fs.create_text_file(path, "bad")["outcome"] == "WRITE_PROTECTED"
+            assert fs.update_text_file(path, sha(b"synthetic"), "bad")["outcome"] == "WRITE_PROTECTED"
+        for directory in ["secret-suffix", "repo/public", "other/private"]:
+            assert fs.list_directory(directory)["ok"]
+            assert fs.read_text_file(directory + "/file")["content"] == "synthetic"
+            assert fs.sha256_file(directory + "/file")["ok"]
+            assert fs.create_text_file(directory + "/new", "allowed")["ok"]
+        assert [entry["path"] for entry in fs.list_directory("repo")["entries"]] == ["repo/public"]
+        assert [entry["path"] for entry in fs.list_directory()["entries"]] == ["other", "repo", "secret-suffix"]
+
+
+@pytest.mark.parametrize("prefix,alias", [("secret", "SECRET"), ("café", "cafe\u0301"),
+                                         ("cafe\u0301", "CAFÉ")])
+def test_read_case_unicode_aliases_protected_and_hidden(tmp_path, prefix, alias):
+    (tmp_path / alias).mkdir()
+    (tmp_path / alias / "file").write_bytes(b"synthetic")
+    with RootFilesystem(tmp_path, read_denied_prefixes=(prefix,)) as fs:
+        assert fs.read_text_file(alias + "/file")["outcome"] == "READ_PROTECTED"
+        assert fs.sha256_file(alias + "/file")["outcome"] == "READ_PROTECTED"
+        assert fs.list_directory(alias)["outcome"] == "READ_PROTECTED"
+        assert fs.create_text_file(alias + "/new", "bad")["outcome"] == "WRITE_PROTECTED"
+        assert fs.update_text_file(alias + "/file", sha(b"synthetic"), "bad")["outcome"] == "WRITE_PROTECTED"
+        assert fs.list_directory()["entries"] == []
+        assert not fs.list_directory()["truncated"]
+    assert (tmp_path / alias / "file").read_bytes() == b"synthetic"
+
+
+def test_root_wide_read_denial_leaves_status_available(tmp_path):
+    (tmp_path / "file").write_bytes(b"synthetic")
+    with RootFilesystem(tmp_path, read_denied_prefixes=(".",)) as fs:
+        status = fs.workspace_status()
+        assert status["ok"] and status["read_denied_prefixes"] == ["."]
+        assert status["write_denied_prefixes"] == []
+        assert fs.list_directory()["outcome"] == "READ_PROTECTED"
+        assert fs.read_text_file("file")["outcome"] == "READ_PROTECTED"
+        assert fs.sha256_file("file")["outcome"] == "READ_PROTECTED"
+        assert fs.create_text_file("new", "bad")["outcome"] == "WRITE_PROTECTED"
+        assert fs.update_text_file("file", sha(b"synthetic"), "bad")["outcome"] == "WRITE_PROTECTED"
+    assert (tmp_path / "file").read_bytes() == b"synthetic"
+    assert not (tmp_path / "new").exists()
+
+
+@pytest.mark.parametrize("prefix", ["/absolute", "../escape", "a//b", "a/./b", "a\x00b"])
+def test_invalid_read_configuration_fails_closed(tmp_path, prefix):
+    with pytest.raises(Refusal):
+        RootFilesystem(tmp_path, read_denied_prefixes=(prefix,))
+
+
+def test_read_policy_not_glob_or_basename_matching(tmp_path):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo/private").write_bytes(b"synthetic")
+    (tmp_path / "private").write_bytes(b"synthetic")
+    (tmp_path / "literal-star*").write_bytes(b"synthetic")
+    (tmp_path / "literal-star-suffix").write_bytes(b"synthetic")
+    with RootFilesystem(tmp_path, read_denied_prefixes=("repo/private", "literal-star*")) as fs:
+        assert fs.read_text_file("repo/private")["outcome"] == "READ_PROTECTED"
+        assert fs.read_text_file("private")["ok"]
+        assert fs.read_text_file("literal-star*")["outcome"] == "READ_PROTECTED"
+        assert fs.read_text_file("literal-star-suffix")["ok"]
