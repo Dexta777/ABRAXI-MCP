@@ -1,11 +1,30 @@
 # ABRAXI-MCP
 
-Bootstrap 001 is published at version 0.1.0 as a local, synthetic-root
-filesystem tracer using the official Python MCP SDK 2.3.0. This uncommitted
-Real-root Safety 001 candidate advances the project/server to version 0.2.0
-and adds configurable read protection before real-root qualification. The
-six tools and **stdio-only** transport are unchanged. The real ABRAXI root
-has not been enabled or qualified; this is not a production-ready service.
+Bootstrap 001 version 0.1.0 was published as a local, synthetic-root
+filesystem tracer using the official Python MCP SDK 2.3.0. Real-root Safety
+001 version 0.2.0 was subsequently published, adding configurable read
+protection. The six tools and **stdio-only** transport are unchanged.
+
+ABRAXI-MCP v0.2.0 subsequently passed Real-root Qualification 001 against
+`/Users/dexter/ABRAXI/Development`. The qualification used explicit read/write
+protections and left pre-existing project state unchanged.
+
+An isolated ABRAXI-MCP runtime has been installed beneath
+`/Users/dexter/ABRAXI/Development/.abraxi-mcp-service`. The official OpenAI
+runtime-only tunnel artifact was technically exercised successfully in a
+bounded session: healthy, ready, authenticated, and bound to the intended
+stdio MCP child. The selected deployment path uses this runtime-only artifact
+to avoid the full client's Codex app-server/helper dependency.
+
+The historical runtime-only qualification's overall evidence classification
+remains `OUTCOME UNKNOWN` because shared Python-cache provenance could not be
+established. `CACHE-PROVENANCE-DECISION-001` accepts that unresolved provenance
+as a non-blocking deployment limitation without rewriting either historical
+`OUTCOME UNKNOWN` classification or attributing uncertain cache artifacts.
+
+Persistent macOS user LaunchAgent installation has not yet occurred. ChatGPT
+custom-MCP connection has not yet occurred. The service is not yet claimed
+production-ready.
 
 ## Install and run locally
 
@@ -29,10 +48,12 @@ writes while keeping `workspace_status` available. The launcher owns the
 process lifetime. Logs and startup errors go to stderr; stdout carries only
 the SDK's MCP protocol traffic.
 
-Do not use a real project directory for this bootstrap. No real ABRAXI root,
-tunnel, ChatGPT/plugin connection, credential access, deployment, governance
-files, or Atelier adoption is included. Real-root enablement and protecting
-the server's own repository require a separate future authority boundary.
+Use a synthetic directory for isolated local validation. The separately
+qualified real-root runtime serves `/Users/dexter/ABRAXI/Development` with
+repository write denial and explicit read-denied prefixes. That qualification
+does not authorize other real roots or expanded access. Persistent service
+installation and ChatGPT custom-MCP configuration remain separate owner
+authorization boundaries.
 
 ## Tool contract
 
@@ -77,9 +98,10 @@ is intentionally visible in `workspace_status`; it is not evidence of file
 existence. Response timing is not guaranteed to be constant.
 
 There is no built-in project-specific secret policy or credential detector.
-Only explicitly configured root-relative prefixes are protected. Selecting
-actual policy for real projects and qualifying a real root remain separate
-future work; this candidate does not claim universal secret detection.
+Only explicitly configured root-relative prefixes are protected. Real-root
+Qualification 001 covered the named root and configured policy; other roots
+and policies require separate qualification. This does not claim universal
+secret detection.
 
 ## Filesystem boundary
 
